@@ -46,7 +46,7 @@ If you need to run the controller with debug logging, you may run `make run-debu
 ## Running tests
 
 Currently there's a minimal set of tests (due to this project being a POC. As it grows, I may add more tests as needed for better coverage) that can be run using `make test`.
-This test suite also runs as part of the CI pipeline (see [this](./.github/workflows/ci_test.yaml) for reference).
+This test suite also runs as part of the CI pipeline (see [this](.github/workflows/ci_test_lint.yaml) for reference).
 
 ## Example Custom Resource
 
