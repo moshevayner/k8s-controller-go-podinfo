@@ -1,0 +1,27 @@
+apiVersion: podinfo-app.podinfo.vayner.me/v1
+kind: PodInfoInstance
+metadata:
+  name: podinfoinstance-sample
+spec:
+  replicaCount: 2
+  resources:
+    memoryRequest: 32Mi
+    memoryLimit: 64Mi
+    cpuRequest: 100m
+    cpuLimit: 200m
+  image:
+    repository: ghcr.io/stefanprodan/podinfo
+    tag: latest
+  ui:
+    color: "#34577c"
+    message: "Hello there!"
+  redis:
+    enabled: true
+    image:
+      repository: redis
+      tag: latest
+    resources:
+      memoryRequest: 32Mi
+      memoryLimit: 64Mi
+      cpuRequest: 100m
+      cpuLimit: 200m

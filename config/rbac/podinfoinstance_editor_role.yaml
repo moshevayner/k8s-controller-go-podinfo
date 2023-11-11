@@ -1,0 +1,31 @@
+# permissions for end users to edit podinfoinstances.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: podinfoinstance-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: k8s-controller-go-podinfo
+    app.kubernetes.io/part-of: k8s-controller-go-podinfo
+    app.kubernetes.io/managed-by: kustomize
+  name: podinfoinstance-editor-role
+rules:
+- apiGroups:
+  - podinfo-app.podinfo.vayner.me
+  resources:
+  - podinfoinstances
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - podinfo-app.podinfo.vayner.me
+  resources:
+  - podinfoinstances/status
+  verbs:
+  - get

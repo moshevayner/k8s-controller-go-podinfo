@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- podinfo-app_v1_podinfoinstance.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
