@@ -21,4 +21,4 @@ jobs:
         run: go test -mod=vendor --timeout=20m ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6.5.0
+        uses: golangci/golangci-lint-action@v6.5.1
