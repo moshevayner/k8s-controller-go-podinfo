@@ -466,7 +466,6 @@ func generateServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance) *c
 
 // generateRedisDeploymentSpecForPodInfoInstance generates a new Redis Deployment object for the given PodInfoInstance and returns it
 func generateRedisDeploymentSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance) *appsv1.Deployment {
-	// TODO(moshe): we may want to consider making the Redis Deployment's replica count configurable in the future
 	replicasCount := int32(1)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
