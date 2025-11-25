@@ -174,7 +174,71 @@ func TestPodInfoInstanceReconciler_CreateDeploymentForPodInfoInstance(t *testing
 }
 
 func TestPodInfoInstanceReconciler_CheckAndUpdateExistingDeploymentAsNeeded(t *testing.T) {
-	// TODO(moshe): Implement this test
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme) // Register podinfoapp/v1 types
+	_ = appsv1.AddToScheme(testScheme)       // Register apps/v1 types
+	_ = corev1.AddToScheme(testScheme)       // Register core/v1 types
+
+	type args struct {
+		ctx context.Context
+		pii *podinfoappv1.PodInfoInstance
+	}
+	tests := []struct {
+		name    string
+		args    args
+		wantErr bool
+	}{
+		{
+			name: "Check and Update Existing Deployment",
+			args: args{
+				ctx: context.Background(),
+				pii: createPodInfoInstance("test", 2, false),
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Initialize the fake client with the necessary objects
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithRuntimeObjects(tt.args.pii).
+				Build()
+
+			r := &PodInfoInstanceReconciler{
+				Client: fakeClient,
+				Scheme: testScheme,
+			}
+
+			// First, create the initial Deployment
+			err := r.CreateDeploymentForPodInfoInstance(tt.args.ctx, tt.args.pii)
+			if err != nil {
+				t.Fatalf("Failed to create initial Deployment: %v", err)
+			}
+
+			// Now, modify the PodInfoInstance to trigger an update
+			tt.args.pii.Spec.ReplicaCount = 3
+			err = fakeClient.Update(context.Background(), tt.args.pii)
+			if err != nil {
+				t.Fatalf("Failed to update PodInfoInstance in fake client: %v", err)
+			}
+
+			// Call the method under test
+			if err := r.CheckAndUpdateExistingDeploymentAsNeeded(tt.args.ctx, tt.args.pii); (err != nil) != tt.wantErr {
+				t.Errorf("PodInfoInstanceReconciler.CheckAndUpdateExistingDeploymentAsNeeded() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			// Verify that the Deployment was updated
+			updatedDeployment := &appsv1.Deployment{}
+			err = fakeClient.Get(context.Background(), client.ObjectKey{Name: tt.args.pii.Name, Namespace: tt.args.pii.Namespace}, updatedDeployment)
+			if err != nil {
+				t.Fatalf("Failed to get updated Deployment: %v", err)
+			}
+			if *updatedDeployment.Spec.Replicas != 3 {
+				t.Errorf("Deployment was not updated correctly. Got replicas = %d, want %d", *updatedDeployment.Spec.Replicas, 3)
+			}
+		})
+	}
 }
 
 // Helper functions to create test instances and expected objects

@@ -15,10 +15,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
-      - name: go test
-        run: go test -mod=vendor --timeout=20m ./...
+      - name: make test
+        run: make test
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9.1.0
