@@ -55,8 +55,6 @@ func (r *PodInfoInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	l := log.FromContext(ctx)
 	l.V(5).Info(fmt.Sprintf("Req: %v", req))
 
-	// TODO(moshe): (Generic across all go-client invocations): Add retry logic for possible network issues, 429, etc., so that in case of a transient error, the controller will retry the API call
-
 	// Fetch the PodInfoInstance instance. If the request fails, return an error unless it's a 404 (Not Found Error), in which case we can just return
 	pii := &podinfoappv1.PodInfoInstance{}
 	err := r.Get(ctx, req.NamespacedName, pii)
