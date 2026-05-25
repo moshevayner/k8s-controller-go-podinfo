@@ -32,6 +32,16 @@ import (
 	podinfoappv1 "github.com/moshevayner/k8s-controller-go-podinfo/api/v1"
 )
 
+const (
+	cacheServerName          = "PODINFO_CACHE_SERVER"
+	kubeNameLabelKey         = "app.kubernetes.io/name"
+	kubePartOfLabelKey       = "app.kubernetes.io/part-of"
+	kubeComponentLabelKey    = "app.kubernetes.io/component"
+	podInfoNameLabelValue    = "podinfo"
+	redisComponentLabelValue = "redis"
+	appComponentLabelValue   = "app"
+)
+
 // PodInfoInstanceReconciler reconciles a PodInfoInstance object
 type PodInfoInstanceReconciler struct {
 	client.Client
@@ -166,7 +176,7 @@ func (r *PodInfoInstanceReconciler) CreateRedisDeploymentAndService(ctx context.
 	pii.Status.RedisService.Errors = nil
 
 	pts.Spec.Containers[0].Env = append(pts.Spec.Containers[0].Env, corev1.EnvVar{
-		Name:  "PODINFO_CACHE_SERVER",
+		Name:  cacheServerName,
 		Value: fmt.Sprintf("tcp://%s:%d", rs.Name, rs.Spec.Ports[0].Port),
 	})
 
@@ -222,7 +232,7 @@ func (r *PodInfoInstanceReconciler) CheckAndUpdateExistingDeploymentAsNeeded(ctx
 			}
 			// Update the Pod's environment variables to remove the Redis Host and Port
 			for i, envVar := range d.Spec.Template.Spec.Containers[0].Env {
-				if envVar.Name == "PODINFO_CACHE_SERVER" {
+				if envVar.Name == cacheServerName {
 					d.Spec.Template.Spec.Containers[0].Env = append(d.Spec.Template.Spec.Containers[0].Env[:i], d.Spec.Template.Spec.Containers[0].Env[i+1:]...)
 					break
 				}
@@ -361,9 +371,9 @@ func generateDeploymentSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance)
 			Name:      pii.Name,
 			Namespace: pii.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      "podinfo",
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "app",
+				kubeNameLabelKey:      podInfoNameLabelValue,
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: appComponentLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(pii, podinfoappv1.GroupVersion.WithKind("PodInfoInstance")),
@@ -373,23 +383,23 @@ func generateDeploymentSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance)
 			Replicas: &pii.Spec.ReplicaCount,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"app.kubernetes.io/name":      "podinfo",
-					"app.kubernetes.io/part-of":   pii.Name,
-					"app.kubernetes.io/component": "app",
+					kubeNameLabelKey:      podInfoNameLabelValue,
+					kubePartOfLabelKey:    pii.Name,
+					kubeComponentLabelKey: appComponentLabelValue,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app.kubernetes.io/name":      "podinfo",
-						"app.kubernetes.io/part-of":   pii.Name,
-						"app.kubernetes.io/component": "app",
+						kubeNameLabelKey:      podInfoNameLabelValue,
+						kubePartOfLabelKey:    pii.Name,
+						kubeComponentLabelKey: appComponentLabelValue,
 					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "podinfo",
+							Name:  podInfoNameLabelValue,
 							Image: fmt.Sprintf("%s:%s", pii.Spec.Image.Repository, pii.Spec.Image.Tag),
 							Env: []corev1.EnvVar{
 								{
@@ -436,9 +446,9 @@ func generateServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance) *c
 			Name:      pii.Name,
 			Namespace: pii.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      "podinfo",
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "app",
+				kubeNameLabelKey:      podInfoNameLabelValue,
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: appComponentLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(pii, podinfoappv1.GroupVersion.WithKind("PodInfoInstance")),
@@ -446,9 +456,9 @@ func generateServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstance) *c
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				"app.kubernetes.io/name":      "podinfo",
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "app",
+				kubeNameLabelKey:      podInfoNameLabelValue,
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: appComponentLabelValue,
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -471,9 +481,9 @@ func generateRedisDeploymentSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInst
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-redis", pii.Name),
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      fmt.Sprintf("%v-redis", pii.Name),
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "redis",
+				kubeNameLabelKey:      fmt.Sprintf("%v-redis", pii.Name),
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: redisComponentLabelValue,
 			},
 			Namespace: pii.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
@@ -484,27 +494,27 @@ func generateRedisDeploymentSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInst
 			Replicas: &replicasCount,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"app.kubernetes.io/name":      fmt.Sprintf("%v-redis", pii.Name),
-					"app.kubernetes.io/part-of":   pii.Name,
-					"app.kubernetes.io/component": "redis",
+					kubeNameLabelKey:      fmt.Sprintf("%v-redis", pii.Name),
+					kubePartOfLabelKey:    pii.Name,
+					kubeComponentLabelKey: redisComponentLabelValue,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app.kubernetes.io/name":      fmt.Sprintf("%v-redis", pii.Name),
-						"app.kubernetes.io/part-of":   pii.Name,
-						"app.kubernetes.io/component": "redis",
+						kubeNameLabelKey:      fmt.Sprintf("%v-redis", pii.Name),
+						kubePartOfLabelKey:    pii.Name,
+						kubeComponentLabelKey: redisComponentLabelValue,
 					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "redis",
+							Name:  redisComponentLabelValue,
 							Image: fmt.Sprintf("%s:%s", pii.Spec.Redis.Image.Repository, pii.Spec.Redis.Image.Tag),
 							Ports: []corev1.ContainerPort{
 								{
-									Name:          "redis",
+									Name:          redisComponentLabelValue,
 									ContainerPort: 6379,
 								},
 							},
@@ -532,9 +542,9 @@ func generateRedisServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstanc
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-redis", pii.Name),
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      fmt.Sprintf("%v-redis", pii.Name),
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "redis",
+				kubeNameLabelKey:      fmt.Sprintf("%v-redis", pii.Name),
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: redisComponentLabelValue,
 			},
 			Namespace: pii.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
@@ -543,13 +553,13 @@ func generateRedisServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstanc
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				"app.kubernetes.io/name":      fmt.Sprintf("%v-redis", pii.Name),
-				"app.kubernetes.io/part-of":   pii.Name,
-				"app.kubernetes.io/component": "redis",
+				kubeNameLabelKey:      fmt.Sprintf("%v-redis", pii.Name),
+				kubePartOfLabelKey:    pii.Name,
+				kubeComponentLabelKey: redisComponentLabelValue,
 			},
 			Ports: []corev1.ServicePort{
 				{
-					Name: "redis",
+					Name: redisComponentLabelValue,
 					Port: 6379,
 				},
 			},
