@@ -10,7 +10,7 @@ This controller was built using [kubebuilder](https://github.com/kubernetes-sigs
 
 The controller watches for custom resources of type `PodinfoInstance` in the `podinfo-app.podinfo.vayner.me/v1` api group, and creates at the very least a deployment and service for each instance. The controller also watches for changes to the custom resource and updates the deployment and service as needed. Any changes made to the custom resource will be reflected in the underlying components. For example, if you change the `replicaCount` field in the custom resource, the app deployment will be scaled accordingly. There is a minimal set of supported configurations the `podinfo` app currently, but more can be added as needed.
 
-Note that when `redis.enabled` is `true`, the controller will also create a redis deployment and service for each instance.
+Note that when `redis.enabled` is `true` and `redis.host` is empty, the controller will also create a redis deployment and service for each instance. When `redis.enabled` is `true` and `redis.host` is set, the controller configures podinfo against that external Redis endpoint and does not create in-cluster Redis resources. If `redis.port` is omitted, `6379` is used.
 
 All of the underlying components will be created in the same namespace as the custom resource, and will have `ownerReferences` set to the custom resource. This means that when the custom resource is deleted, all of the underlying components will be deleted as well.
 

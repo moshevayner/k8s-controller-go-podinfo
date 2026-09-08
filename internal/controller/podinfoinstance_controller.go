@@ -40,6 +40,7 @@ const (
 	podInfoNameLabelValue    = "podinfo"
 	redisComponentLabelValue = "redis"
 	appComponentLabelValue   = "app"
+	defaultRedisPort         = int32(6379)
 )
 
 // PodInfoInstanceReconciler reconciles a PodInfoInstance object
@@ -113,13 +114,15 @@ func (r *PodInfoInstanceReconciler) CreateDeploymentForPodInfoInstance(ctx conte
 	// Create a Deployment object with the needed fields (name, namespace, labels, owner reference, etc.)
 	d := generateDeploymentSpecForPodInfoInstance(pii)
 
-	// If Redis is enabled, invoke AddRedisToDeployment to add a Redis Deployment and Service and configure the Pod's environment variables
-	if pii.Spec.Redis.Enabled {
+	if usesInClusterRedis(pii) {
 		l.V(5).Info(fmt.Sprintf("Redis is enabled for PodInfoInstance %s, creating Redis Deployment and Service", pii.Name))
 		err := r.CreateRedisDeploymentAndService(ctx, &d.Spec.Template, pii)
 		if err != nil {
 			return err
 		}
+	} else if usesExternalRedis(pii) {
+		l.V(5).Info(fmt.Sprintf("External Redis is configured for PodInfoInstance %s at %s", pii.Name, redisCacheServerValue(pii, "")))
+		setCacheServerEnv(&d.Spec.Template, redisCacheServerValue(pii, ""))
 	}
 
 	l.V(5).Info(fmt.Sprintf("Creating App Deployment %s", d.Name))
@@ -174,11 +177,7 @@ func (r *PodInfoInstanceReconciler) CreateRedisDeploymentAndService(ctx context.
 	// Update the PodInfoInstance's status with the name of the Redis Service
 	pii.Status.RedisService.Name = rs.Name
 	pii.Status.RedisService.Errors = nil
-
-	pts.Spec.Containers[0].Env = append(pts.Spec.Containers[0].Env, corev1.EnvVar{
-		Name:  cacheServerName,
-		Value: fmt.Sprintf("tcp://%s:%d", rs.Name, rs.Spec.Ports[0].Port),
-	})
+	setCacheServerEnv(pts, redisCacheServerValue(pii, rs.Name))
 
 	return nil
 }
@@ -202,9 +201,7 @@ func (r *PodInfoInstanceReconciler) CheckAndUpdateExistingDeploymentAsNeeded(ctx
 
 	appDeploymentUpdateRequired := checkAndUpdateAppDeploymentSpec(ctx, d, pii)
 
-	// If we have an existing Redis deployment, check if it needs to be updated or deleted
 	if pii.Status.RedisDeployment.Name != "" {
-		// Fetch the Redis Deployment object for the PodInfoInstance
 		rd := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pii.Status.RedisDeployment.Name, Namespace: pii.Namespace}}
 		err := r.Get(ctx, client.ObjectKeyFromObject(rd), rd)
 		if err != nil {
@@ -212,17 +209,14 @@ func (r *PodInfoInstanceReconciler) CheckAndUpdateExistingDeploymentAsNeeded(ctx
 			pii.Status.RedisDeployment.Errors = append(pii.Status.RedisDeployment.Errors, fmt.Sprintf("Error getting Redis Deployment %s: %v", pii.Status.RedisDeployment.Name, err))
 			return err
 		}
-		if !pii.Spec.Redis.Enabled {
-			// Since we have a Redis Deployment but Redis is disabled, delete the Redis Deployment and Service
-			l.V(5).Info(fmt.Sprintf("Redis is disabled for PodInfoInstance %s, but the Redis Deployment and Service have not been deleted yet. Deleting them now", pii.Name))
-			// Delete the Redis Deployment
+		if !usesInClusterRedis(pii) {
+			l.V(5).Info(fmt.Sprintf("In-cluster Redis is no longer required for PodInfoInstance %s. Deleting the Redis Deployment and Service", pii.Name))
 			err := r.Delete(ctx, rd)
 			if err != nil {
 				l.Error(err, fmt.Sprintf("Error while attempting to delete Redis Deployment %s", rd.Name))
 				pii.Status.RedisDeployment.Errors = append(pii.Status.RedisDeployment.Errors, fmt.Sprintf("Error deleting Redis Deployment %s: %v", rd.Name, err))
 				return err
 			}
-			// Delete the Redis Service
 			rs := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pii.Status.RedisService.Name, Namespace: pii.Namespace}}
 			err = r.Delete(ctx, rs)
 			if err != nil {
@@ -230,40 +224,41 @@ func (r *PodInfoInstanceReconciler) CheckAndUpdateExistingDeploymentAsNeeded(ctx
 				pii.Status.RedisService.Errors = append(pii.Status.RedisService.Errors, fmt.Sprintf("Error deleting Redis Service %s: %v", rs.Name, err))
 				return err
 			}
-			// Update the Pod's environment variables to remove the Redis Host and Port
-			for i, envVar := range d.Spec.Template.Spec.Containers[0].Env {
-				if envVar.Name == cacheServerName {
-					d.Spec.Template.Spec.Containers[0].Env = append(d.Spec.Template.Spec.Containers[0].Env[:i], d.Spec.Template.Spec.Containers[0].Env[i+1:]...)
-					break
-				}
-			}
-			// Update the PodInfoInstance's status to reflect that the Redis Deployment and Service have been deleted
 			pii.Status.RedisDeployment.Name = ""
 			pii.Status.RedisService.Name = ""
 			pii.Status.RedisDeployment.Errors = nil
 			pii.Status.RedisService.Errors = nil
-			appDeploymentUpdateRequired = true
-		} else {
-			// Redis is enabled, check if the Redis Deployment needs to be updated and update it as needed
-			if checkAndUpdateRedisDeploymentSpec(ctx, rd, pii) {
-				err = r.Update(ctx, rd)
-				if err != nil {
-					l.Error(err, fmt.Sprintf("Error while attempting to update Redis Deployment %s", rd.Name))
-					pii.Status.RedisDeployment.Errors = append(pii.Status.RedisDeployment.Errors, fmt.Sprintf("Error updating Redis Deployment %s: %v", rd.Name, err))
-					return err
-				}
+			if usesExternalRedis(pii) {
+				setCacheServerEnv(&d.Spec.Template, redisCacheServerValue(pii, ""))
+			} else {
+				removeCacheServerEnv(&d.Spec.Template)
 			}
-		}
-	} else {
-		// Check if Redis is enabled and if so, create a Redis Deployment and Service
-		if pii.Spec.Redis.Enabled {
-			l.V(5).Info(fmt.Sprintf("Redis is enabled for PodInfoInstance %s, but no Redis Deployment or Service exists yet. Creating them now", pii.Name))
-			err := r.CreateRedisDeploymentAndService(ctx, &d.Spec.Template, pii)
+			appDeploymentUpdateRequired = true
+		} else if checkAndUpdateRedisDeploymentSpec(ctx, rd, pii) {
+			err = r.Update(ctx, rd)
 			if err != nil {
+				l.Error(err, fmt.Sprintf("Error while attempting to update Redis Deployment %s", rd.Name))
+				pii.Status.RedisDeployment.Errors = append(pii.Status.RedisDeployment.Errors, fmt.Sprintf("Error updating Redis Deployment %s: %v", rd.Name, err))
 				return err
 			}
+		}
+	} else if usesInClusterRedis(pii) {
+		l.V(5).Info(fmt.Sprintf("Redis is enabled for PodInfoInstance %s, but no Redis Deployment or Service exists yet. Creating them now", pii.Name))
+		err := r.CreateRedisDeploymentAndService(ctx, &d.Spec.Template, pii)
+		if err != nil {
+			return err
+		}
+		appDeploymentUpdateRequired = true
+	} else if usesExternalRedis(pii) {
+		desiredCacheServer := redisCacheServerValue(pii, "")
+		if cacheServerEnvValue(&d.Spec.Template) != desiredCacheServer {
+			l.V(5).Info(fmt.Sprintf("Updating external Redis endpoint for PodInfoInstance %s to %s", pii.Name, desiredCacheServer))
+			setCacheServerEnv(&d.Spec.Template, desiredCacheServer)
 			appDeploymentUpdateRequired = true
 		}
+	} else if cacheServerEnvValue(&d.Spec.Template) != "" {
+		removeCacheServerEnv(&d.Spec.Template)
+		appDeploymentUpdateRequired = true
 	}
 
 	if appDeploymentUpdateRequired {
@@ -560,9 +555,62 @@ func generateRedisServiceSpecForPodInfoInstance(pii *podinfoappv1.PodInfoInstanc
 			Ports: []corev1.ServicePort{
 				{
 					Name: redisComponentLabelValue,
-					Port: 6379,
+					Port: defaultRedisPort,
 				},
 			},
 		},
+	}
+}
+
+func usesInClusterRedis(pii *podinfoappv1.PodInfoInstance) bool {
+	return pii.Spec.Redis.Enabled && pii.Spec.Redis.Host == ""
+}
+
+func usesExternalRedis(pii *podinfoappv1.PodInfoInstance) bool {
+	return pii.Spec.Redis.Enabled && pii.Spec.Redis.Host != ""
+}
+
+func redisPort(pii *podinfoappv1.PodInfoInstance) int32 {
+	if pii.Spec.Redis.Port != 0 {
+		return pii.Spec.Redis.Port
+	}
+	return defaultRedisPort
+}
+
+func redisCacheServerValue(pii *podinfoappv1.PodInfoInstance, inClusterServiceName string) string {
+	if usesExternalRedis(pii) {
+		return fmt.Sprintf("tcp://%s:%d", pii.Spec.Redis.Host, redisPort(pii))
+	}
+	return fmt.Sprintf("tcp://%s:%d", inClusterServiceName, defaultRedisPort)
+}
+
+func cacheServerEnvValue(pts *corev1.PodTemplateSpec) string {
+	for _, environmentVariable := range pts.Spec.Containers[0].Env {
+		if environmentVariable.Name == cacheServerName {
+			return environmentVariable.Value
+		}
+	}
+	return ""
+}
+
+func setCacheServerEnv(pts *corev1.PodTemplateSpec, value string) {
+	for i, environmentVariable := range pts.Spec.Containers[0].Env {
+		if environmentVariable.Name == cacheServerName {
+			pts.Spec.Containers[0].Env[i].Value = value
+			return
+		}
+	}
+	pts.Spec.Containers[0].Env = append(pts.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  cacheServerName,
+		Value: value,
+	})
+}
+
+func removeCacheServerEnv(pts *corev1.PodTemplateSpec) {
+	for i, environmentVariable := range pts.Spec.Containers[0].Env {
+		if environmentVariable.Name == cacheServerName {
+			pts.Spec.Containers[0].Env = append(pts.Spec.Containers[0].Env[:i], pts.Spec.Containers[0].Env[i+1:]...)
+			return
+		}
 	}
 }

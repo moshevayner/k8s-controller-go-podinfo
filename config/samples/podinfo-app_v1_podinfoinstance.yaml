@@ -25,3 +25,6 @@ spec:
       memoryLimit: 64Mi
       cpuRequest: 100m
       cpuLimit: 200m
+    # Set host (and optionally port) to use an external Redis instead of creating one in-cluster.
+    # host: my-elasticache.cache.amazonaws.com
+    # port: 6379

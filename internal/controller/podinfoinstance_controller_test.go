@@ -140,8 +140,8 @@ func TestPodInfoInstanceReconciler_CreateDeploymentForPodInfoInstance(t *testing
 
 			expectedAppDeployment := generateDeploymentSpecForPodInfoInstance(tt.args.pii)
 
-			if tt.args.pii.Spec.Redis.Enabled {
-				// If Redis is enabled, check that the Redis Deployment and Service were created
+			if usesInClusterRedis(tt.args.pii) {
+				// If Redis is enabled in-cluster, check that the Redis Deployment and Service were created
 				expectedRedisDeployment := generateRedisDeploymentSpecForPodInfoInstance(tt.args.pii)
 				rd := &appsv1.Deployment{}
 				err := fakeClient.Get(context.Background(), client.ObjectKey{Name: tt.args.pii.Name + "-redis", Namespace: tt.args.pii.Namespace}, rd)
@@ -389,6 +389,66 @@ func TestPodInfoInstanceReconciler_UpdatesAppAndRedisLifecycle(t *testing.T) {
 	}
 	if pii.Status.RedisDeployment.Name != "" || pii.Status.RedisService.Name != "" {
 		t.Errorf("Redis status = %+v, expected Redis resource names to be cleared", pii.Status)
+	}
+
+	pii.Spec.Redis.Enabled = true
+	pii.Spec.Redis.Host = "cache.example.com"
+	pii.Spec.Redis.Port = 6380
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to configure external Redis: %v", err)
+	}
+	if err := fakeClient.Get(ctx, redisKey, &appsv1.Deployment{}); err == nil {
+		t.Error("Redis Deployment was created for an external Redis endpoint")
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(pii), appDeployment); err != nil {
+		t.Fatalf("Failed to get app Deployment after configuring external Redis: %v", err)
+	}
+	if !hasEnvironmentVariable(appDeployment, cacheServerName, "tcp://cache.example.com:6380") {
+		t.Error("app Deployment did not receive the external Redis cache server environment variable")
+	}
+
+	pii.Spec.Redis.Port = 0
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to apply the default external Redis port: %v", err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(pii), appDeployment); err != nil {
+		t.Fatalf("Failed to get app Deployment after applying the default Redis port: %v", err)
+	}
+	if !hasEnvironmentVariable(appDeployment, cacheServerName, "tcp://cache.example.com:6379") {
+		t.Error("app Deployment did not fall back to Redis port 6379")
+	}
+}
+
+func TestPodInfoInstanceReconciler_CreateDeploymentForExternalRedis(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme)
+	_ = appsv1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+
+	pii := createPodInfoInstance("external-redis", 1, true)
+	pii.Spec.Redis.Host = "my-elasticache.cache.amazonaws.com"
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithRuntimeObjects(pii).
+		Build()
+	r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+	if err := r.CreateDeploymentForPodInfoInstance(context.Background(), pii); err != nil {
+		t.Fatalf("CreateDeploymentForPodInfoInstance() error = %v", err)
+	}
+
+	appDeployment := &appsv1.Deployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pii), appDeployment); err != nil {
+		t.Fatalf("Failed to get app Deployment: %v", err)
+	}
+	if !hasEnvironmentVariable(appDeployment, cacheServerName, "tcp://my-elasticache.cache.amazonaws.com:6379") {
+		t.Error("app Deployment did not receive the external Redis cache server environment variable")
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: pii.Name + "-redis", Namespace: pii.Namespace}, &appsv1.Deployment{}); err == nil {
+		t.Error("Redis Deployment was created for an external Redis endpoint")
+	}
+	if pii.Status.RedisDeployment.Name != "" || pii.Status.RedisService.Name != "" {
+		t.Errorf("Redis status = %+v, expected in-cluster Redis names to remain empty", pii.Status)
 	}
 }
 
