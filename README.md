@@ -27,7 +27,7 @@ Refer to the [PodinfoInstance](./api/v1/podinfoinstance_types.go) type or the ex
 
 ## Image Build & Push
 
-- Run `make docker-build docker-push` to build and push the image to your registry of choice. You may also set the `IMG` variable to your desired image name and tag, e.g. `IMG=quay.io/username/k8s-controller-go-podinfo:v0.0.1 make docker-build docker-push`
+- Run `make docker-build docker-push` to build and push the image to your registry of choice. The default image tag is derived from `git describe` (`VERSION`). You may also set `IMG` or `VERSION` explicitly, e.g. `IMG=quay.io/username/k8s-controller-go-podinfo:v0.0.1 make docker-build docker-push` or `VERSION=v0.0.1 make docker-build docker-push`.
 
 ## Running locally
 
