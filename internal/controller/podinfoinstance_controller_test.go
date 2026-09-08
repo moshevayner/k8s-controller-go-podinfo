@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -27,8 +28,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+)
+
+const (
+	testNamespace   = "default"
+	testMemory128Mi = "128Mi"
+	testCPU500m     = "500m"
 )
 
 func TestPodInfoInstanceReconciler_CreateDeploymentForPodInfoInstance(t *testing.T) {
@@ -53,15 +62,15 @@ func TestPodInfoInstanceReconciler_CreateDeploymentForPodInfoInstance(t *testing
 				pii: &podinfoappv1.PodInfoInstance{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test",
-						Namespace: "default",
+						Namespace: testNamespace,
 					},
 					Spec: podinfoappv1.PodInfoInstanceSpec{
 						ReplicaCount: 1,
 						Resources: podinfoappv1.Resources{
 							MemoryRequest: "64Mi",
-							MemoryLimit:   "128Mi",
+							MemoryLimit:   testMemory128Mi,
 							CPURequest:    "250m",
-							CPULimit:      "500m",
+							CPULimit:      testCPU500m,
 						},
 						Image: podinfoappv1.Image{
 							Repository: "stefanprodan/podinfo",
@@ -137,8 +146,8 @@ func TestPodInfoInstanceReconciler_CreateDeploymentForPodInfoInstance(t *testing
 
 			expectedAppDeployment := generateDeploymentSpecForPodInfoInstance(tt.args.pii)
 
-			if tt.args.pii.Spec.Redis.Enabled {
-				// If Redis is enabled, check that the Redis Deployment and Service were created
+			if usesInClusterRedis(tt.args.pii) {
+				// If Redis is enabled in-cluster, check that the Redis Deployment and Service were created
 				expectedRedisDeployment := generateRedisDeploymentSpecForPodInfoInstance(tt.args.pii)
 				rd := &appsv1.Deployment{}
 				err := fakeClient.Get(context.Background(), client.ObjectKey{Name: tt.args.pii.Name + "-redis", Namespace: tt.args.pii.Namespace}, rd)
@@ -241,20 +250,342 @@ func TestPodInfoInstanceReconciler_CheckAndUpdateExistingDeploymentAsNeeded(t *t
 	}
 }
 
-// Helper functions to create test instances and expected objects
+func TestPodInfoInstanceReconciler_ReconcileCreatesResourcesAndIgnoresMissingInstance(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme)
+	_ = appsv1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+
+	t.Run("creates resources and persists status", func(t *testing.T) {
+		pii := createPodInfoInstance("reconcile-test", 1, false)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithStatusSubresource(&podinfoappv1.PodInfoInstance{}).
+			WithRuntimeObjects(pii).
+			Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pii)})
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+
+		updatedPii := &podinfoappv1.PodInfoInstance{}
+		if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pii), updatedPii); err != nil {
+			t.Fatalf("Failed to get reconciled PodInfoInstance: %v", err)
+		}
+		if updatedPii.Status.AppDeployment.Name != pii.Name || updatedPii.Status.AppService.Name != pii.Name {
+			t.Errorf("status = %+v, expected app Deployment and Service names to be %q", updatedPii.Status, pii.Name)
+		}
+		if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pii), &appsv1.Deployment{}); err != nil {
+			t.Errorf("Failed to get reconciled app Deployment: %v", err)
+		}
+		if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pii), &corev1.Service{}); err != nil {
+			t.Errorf("Failed to get reconciled app Service: %v", err)
+		}
+	})
+
+	t.Run("ignores a missing instance", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(testScheme).Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKey{Name: "missing", Namespace: testNamespace}})
+		if err != nil {
+			t.Errorf("Reconcile() error = %v, want nil for a missing instance", err)
+		}
+	})
+}
+
+func TestPodInfoInstanceReconciler_UpdatesAppDeploymentSpec(t *testing.T) {
+	r, fakeClient, pii, ctx := setupExistingApp(t, "app-update-test")
+
+	pii.Spec.ReplicaCount = 3
+	pii.Spec.Image.Tag = "6.7.0"
+	pii.Spec.UI.Color = "#000000"
+	pii.Spec.UI.Message = "Updated message"
+	pii.Spec.Resources = podinfoappv1.Resources{
+		MemoryRequest: testMemory128Mi,
+		MemoryLimit:   "256Mi",
+		CPURequest:    testCPU500m,
+		CPULimit:      "1",
+	}
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to update app Deployment: %v", err)
+	}
+
+	appDeployment := getAppDeployment(t, fakeClient, ctx, pii)
+	container := appDeployment.Spec.Template.Spec.Containers[0]
+	if *appDeployment.Spec.Replicas != pii.Spec.ReplicaCount || container.Image != "stefanprodan/podinfo:6.7.0" {
+		t.Errorf("app Deployment replicas/image = %d/%q, want %d/%q", *appDeployment.Spec.Replicas, container.Image, pii.Spec.ReplicaCount, "stefanprodan/podinfo:6.7.0")
+	}
+	if container.Env[0].Value != pii.Spec.UI.Color || container.Env[1].Value != pii.Spec.UI.Message {
+		t.Errorf("app Deployment UI environment = %+v, want color %q and message %q", container.Env, pii.Spec.UI.Color, pii.Spec.UI.Message)
+	}
+	if container.Resources.Requests.Cpu().String() != pii.Spec.Resources.CPURequest || container.Resources.Limits.Memory().String() != pii.Spec.Resources.MemoryLimit {
+		t.Errorf("app Deployment resources = %+v, want %+v", container.Resources, pii.Spec.Resources)
+	}
+}
+
+func TestPodInfoInstanceReconciler_EnablesUpdatesAndDisablesRedis(t *testing.T) {
+	r, fakeClient, pii, ctx := setupExistingApp(t, "redis-lifecycle-test")
+	redisKey := client.ObjectKey{Name: pii.Name + "-redis", Namespace: pii.Namespace}
+
+	pii.Spec.Redis.Enabled = true
+	pii.Spec.Redis.Image = podinfoappv1.Image{Repository: "redis", Tag: "7.4"}
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to enable Redis: %v", err)
+	}
+
+	redisDeployment := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, redisKey, redisDeployment); err != nil {
+		t.Fatalf("Failed to get Redis Deployment: %v", err)
+	}
+	if pii.Status.RedisDeployment.Name != redisKey.Name || pii.Status.RedisService.Name != redisKey.Name {
+		t.Errorf("Redis status = %+v, expected names to be %q", pii.Status, redisKey.Name)
+	}
+	appDeployment := getAppDeployment(t, fakeClient, ctx, pii)
+	if !hasCacheServerEnv(appDeployment, "tcp://redis-lifecycle-test-redis:6379") {
+		t.Error("app Deployment did not receive the Redis cache server environment variable")
+	}
+
+	pii.Spec.Redis.Image.Tag = "7.4.1"
+	pii.Spec.Redis.Resources.MemoryLimit = "2Gi"
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to update Redis: %v", err)
+	}
+	if err := fakeClient.Get(ctx, redisKey, redisDeployment); err != nil {
+		t.Fatalf("Failed to get updated Redis Deployment: %v", err)
+	}
+	redisContainer := redisDeployment.Spec.Template.Spec.Containers[0]
+	if redisContainer.Image != "redis:7.4.1" || redisContainer.Resources.Limits.Memory().String() != "2Gi" {
+		t.Errorf("Redis Deployment image/resources = %q/%+v, want %q and memory limit %q", redisContainer.Image, redisContainer.Resources, "redis:7.4.1", "2Gi")
+	}
+
+	pii.Spec.Redis.Enabled = false
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to disable Redis: %v", err)
+	}
+	assertMissing(t, fakeClient, ctx, redisKey, &appsv1.Deployment{}, "Redis Deployment still exists after disabling Redis")
+	assertMissing(t, fakeClient, ctx, redisKey, &corev1.Service{}, "Redis Service still exists after disabling Redis")
+	appDeployment = getAppDeployment(t, fakeClient, ctx, pii)
+	if hasCacheServerEnv(appDeployment, "") {
+		t.Error("app Deployment still contains the Redis cache server environment variable")
+	}
+	if pii.Status.RedisDeployment.Name != "" || pii.Status.RedisService.Name != "" {
+		t.Errorf("Redis status = %+v, expected Redis resource names to be cleared", pii.Status)
+	}
+}
+
+func TestPodInfoInstanceReconciler_SwitchesToExternalRedis(t *testing.T) {
+	r, fakeClient, pii, ctx := setupExistingApp(t, "external-redis-switch")
+	redisKey := client.ObjectKey{Name: pii.Name + "-redis", Namespace: pii.Namespace}
+
+	pii.Spec.Redis.Enabled = true
+	pii.Spec.Redis.Host = "cache.example.com"
+	pii.Spec.Redis.Port = 6380
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to configure external Redis: %v", err)
+	}
+	assertMissing(t, fakeClient, ctx, redisKey, &appsv1.Deployment{}, "Redis Deployment was created for an external Redis endpoint")
+	appDeployment := getAppDeployment(t, fakeClient, ctx, pii)
+	if !hasCacheServerEnv(appDeployment, "tcp://cache.example.com:6380") {
+		t.Error("app Deployment did not receive the external Redis cache server environment variable")
+	}
+
+	pii.Spec.Redis.Port = 0
+	if err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii); err != nil {
+		t.Fatalf("Failed to apply the default external Redis port: %v", err)
+	}
+	appDeployment = getAppDeployment(t, fakeClient, ctx, pii)
+	if !hasCacheServerEnv(appDeployment, "tcp://cache.example.com:6379") {
+		t.Error("app Deployment did not fall back to Redis port 6379")
+	}
+}
+
+func TestPodInfoInstanceReconciler_CreateDeploymentForExternalRedis(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme)
+	_ = appsv1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+
+	pii := createPodInfoInstance("external-redis", 1, true)
+	pii.Spec.Redis.Host = "my-elasticache.cache.amazonaws.com"
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithRuntimeObjects(pii).
+		Build()
+	r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+	if err := r.CreateDeploymentForPodInfoInstance(context.Background(), pii); err != nil {
+		t.Fatalf("CreateDeploymentForPodInfoInstance() error = %v", err)
+	}
+
+	appDeployment := &appsv1.Deployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pii), appDeployment); err != nil {
+		t.Fatalf("Failed to get app Deployment: %v", err)
+	}
+	if !hasCacheServerEnv(appDeployment, "tcp://my-elasticache.cache.amazonaws.com:6379") {
+		t.Error("app Deployment did not receive the external Redis cache server environment variable")
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: pii.Name + "-redis", Namespace: pii.Namespace}, &appsv1.Deployment{}); err == nil {
+		t.Error("Redis Deployment was created for an external Redis endpoint")
+	}
+	if pii.Status.RedisDeployment.Name != "" || pii.Status.RedisService.Name != "" {
+		t.Errorf("Redis status = %+v, expected in-cluster Redis names to remain empty", pii.Status)
+	}
+}
+
+func TestPodInfoInstanceReconciler_RecordsClientOperationErrors(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme)
+	_ = appsv1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+	ctx := context.Background()
+	clientError := errors.New("API unavailable")
+
+	t.Run("returns a PodInfoInstance get error", func(t *testing.T) {
+		pii := createPodInfoInstance("get-error", 1, false)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithRuntimeObjects(pii).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return clientError
+				},
+			}).
+			Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pii)})
+		if !errors.Is(err, clientError) {
+			t.Errorf("Reconcile() error = %v, want %v", err, clientError)
+		}
+	})
+
+	t.Run("records a Deployment create error", func(t *testing.T) {
+		pii := createPodInfoInstance("create-error", 1, false)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+					return clientError
+				},
+			}).
+			Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+		err := r.CreateDeploymentForPodInfoInstance(ctx, pii)
+		if !errors.Is(err, clientError) || len(pii.Status.AppDeployment.Errors) != 1 {
+			t.Errorf("CreateDeploymentForPodInfoInstance() error/status = %v/%+v, want %v and one app Deployment error", err, pii.Status, clientError)
+		}
+	})
+
+	t.Run("records an app Deployment update error", func(t *testing.T) {
+		pii := createPodInfoInstance("update-error", 1, false)
+		deployment := generateDeploymentSpecForPodInfoInstance(pii)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithRuntimeObjects(deployment).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+					return clientError
+				},
+			}).
+			Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+		pii.Status.AppDeployment.Name = pii.Name
+		pii.Spec.ReplicaCount = 2
+
+		err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii)
+		if !errors.Is(err, clientError) || len(pii.Status.AppDeployment.Errors) != 1 {
+			t.Errorf("CheckAndUpdateExistingDeploymentAsNeeded() error/status = %v/%+v, want %v and one app Deployment error", err, pii.Status, clientError)
+		}
+	})
+
+	t.Run("records a Redis Deployment delete error", func(t *testing.T) {
+		pii := createPodInfoInstance("delete-error", 1, false)
+		pii.Status.AppDeployment.Name = pii.Name
+		pii.Status.RedisDeployment.Name = pii.Name + "-redis"
+		pii.Status.RedisService.Name = pii.Name + "-redis"
+		appDeployment := generateDeploymentSpecForPodInfoInstance(pii)
+		appDeployment.Spec.Template.Spec.Containers[0].Env = append(appDeployment.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: cacheServerName, Value: "tcp://delete-error-redis:6379"})
+		redisDeployment := generateRedisDeploymentSpecForPodInfoInstance(pii)
+		redisService := generateRedisServiceSpecForPodInfoInstance(pii)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithRuntimeObjects(appDeployment, redisDeployment, redisService).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+					return clientError
+				},
+			}).
+			Build()
+		r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+
+		err := r.CheckAndUpdateExistingDeploymentAsNeeded(ctx, pii)
+		if !errors.Is(err, clientError) || len(pii.Status.RedisDeployment.Errors) != 1 {
+			t.Errorf("CheckAndUpdateExistingDeploymentAsNeeded() error/status = %v/%+v, want %v and one Redis Deployment error", err, pii.Status, clientError)
+		}
+	})
+}
+
+func hasCacheServerEnv(deployment *appsv1.Deployment, value string) bool {
+	for _, environmentVariable := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if environmentVariable.Name == cacheServerName && (value == "" || environmentVariable.Value == value) {
+			return true
+		}
+	}
+	return false
+}
+
+func setupExistingApp(t *testing.T, name string) (*PodInfoInstanceReconciler, client.Client, *podinfoappv1.PodInfoInstance, context.Context) {
+	t.Helper()
+	pii := createPodInfoInstance(name, 1, false)
+	testScheme := runtime.NewScheme()
+	_ = podinfoappv1.AddToScheme(testScheme)
+	_ = appsv1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithRuntimeObjects(pii).
+		Build()
+	r := &PodInfoInstanceReconciler{Client: fakeClient, Scheme: testScheme}
+	ctx := context.Background()
+	if err := r.CreateDeploymentForPodInfoInstance(ctx, pii); err != nil {
+		t.Fatalf("Failed to create initial app resources: %v", err)
+	}
+	return r, fakeClient, pii, ctx
+}
+
+func getAppDeployment(t *testing.T, fakeClient client.Client, ctx context.Context, pii *podinfoappv1.PodInfoInstance) *appsv1.Deployment {
+	t.Helper()
+	appDeployment := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(pii), appDeployment); err != nil {
+		t.Fatalf("Failed to get app Deployment: %v", err)
+	}
+	return appDeployment
+}
+
+func assertMissing(t *testing.T, fakeClient client.Client, ctx context.Context, key client.ObjectKey, obj client.Object, message string) {
+	t.Helper()
+	if err := fakeClient.Get(ctx, key, obj); err == nil {
+		t.Error(message)
+	}
+}
+
 func createPodInfoInstance(name string, replicaCount int32, redisEnabled bool) *podinfoappv1.PodInfoInstance {
 	return &podinfoappv1.PodInfoInstance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: podinfoappv1.PodInfoInstanceSpec{
 			ReplicaCount: replicaCount,
 			Resources: podinfoappv1.Resources{
 				MemoryRequest: "64Mi",
-				MemoryLimit:   "128Mi",
+				MemoryLimit:   testMemory128Mi,
 				CPURequest:    "250m",
-				CPULimit:      "500m",
+				CPULimit:      testCPU500m,
 			},
 			Image: podinfoappv1.Image{
 				Repository: "stefanprodan/podinfo",

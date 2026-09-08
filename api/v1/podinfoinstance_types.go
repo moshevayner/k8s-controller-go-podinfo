@@ -42,12 +42,16 @@ type UI struct {
 }
 
 type Redis struct {
+	// Enabled controls whether podinfo should be configured with Redis.
+	// When true and Host is empty, the controller creates an in-cluster Redis Deployment and Service.
+	// When true and Host is set, the controller uses that external Redis and does not create in-cluster Redis resources.
 	Enabled   bool      `json:"enabled,omitempty"`
 	Image     Image     `json:"image,omitempty"`
 	Resources Resources `json:"resources,omitempty"`
-	// TODO In the future we can consider supporting external Redis for better resiliency (i.e. AWS ElastiCache), but for the POC we'll just use an in-cluster one
-	// Host    string `json:"host,omitempty"`
-	// Port    int    `json:"port,omitempty"`
+	// Host is the hostname or IP of an external Redis instance (for example AWS ElastiCache).
+	Host string `json:"host,omitempty"`
+	// Port is the port of the external Redis instance. When Host is set and Port is omitted, 6379 is used.
+	Port int32 `json:"port,omitempty"`
 }
 
 // PodInfoInstanceSpec defines the desired state of PodInfoInstance

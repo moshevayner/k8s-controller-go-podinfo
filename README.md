@@ -10,7 +10,7 @@ This controller was built using [kubebuilder](https://github.com/kubernetes-sigs
 
 The controller watches for custom resources of type `PodinfoInstance` in the `podinfo-app.podinfo.vayner.me/v1` api group, and creates at the very least a deployment and service for each instance. The controller also watches for changes to the custom resource and updates the deployment and service as needed. Any changes made to the custom resource will be reflected in the underlying components. For example, if you change the `replicaCount` field in the custom resource, the app deployment will be scaled accordingly. There is a minimal set of supported configurations the `podinfo` app currently, but more can be added as needed.
 
-Note that when `redis.enabled` is `true`, the controller will also create a redis deployment and service for each instance.
+Note that when `redis.enabled` is `true` and `redis.host` is empty, the controller will also create a redis deployment and service for each instance. When `redis.enabled` is `true` and `redis.host` is set, the controller configures podinfo against that external Redis endpoint and does not create in-cluster Redis resources. If `redis.port` is omitted, `6379` is used.
 
 All of the underlying components will be created in the same namespace as the custom resource, and will have `ownerReferences` set to the custom resource. This means that when the custom resource is deleted, all of the underlying components will be deleted as well.
 
@@ -27,7 +27,7 @@ Refer to the [PodinfoInstance](./api/v1/podinfoinstance_types.go) type or the ex
 
 ## Image Build & Push
 
-- Run `make docker-build docker-push` to build and push the image to your registry of choice. You may also set the `IMG` variable to your desired image name and tag, e.g. `IMG=quay.io/username/k8s-controller-go-podinfo:v0.0.1 make docker-build docker-push`
+- Run `make docker-build docker-push` to build and push the image to your registry of choice. The default image tag is derived from `git describe` (`VERSION`). You may also set `IMG` or `VERSION` explicitly, e.g. `IMG=quay.io/username/k8s-controller-go-podinfo:v0.0.1 make docker-build docker-push` or `VERSION=v0.0.1 make docker-build docker-push`.
 
 ## Running locally
 
